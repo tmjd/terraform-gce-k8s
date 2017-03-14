@@ -6,41 +6,41 @@ provider "google" {
   credentials = "${file("${var.credentials_file_path}")}"
 }
 
-resource "google_compute_http_health_check" "default" {
-  name                = "tf-www-basic-check"
-  request_path        = "/"
-  check_interval_sec  = 1
-  healthy_threshold   = 1
-  unhealthy_threshold = 10
-  timeout_sec         = 1
+resource "google_compute_network" "calico-net" {
+  name = "calico-network"
+  auto_create_subnetworks = "false"
 }
 
-resource "google_compute_target_pool" "default" {
-  name          = "tf-www-target-pool"
-  instances     = ["${google_compute_instance.www.*.self_link}"]
-  health_checks = ["${google_compute_http_health_check.default.name}"]
+resource "google_compute_subnetwork" "calico-subnet" {
+  name          = "calico-subnet"
+  ip_cidr_range = "10.128.0.0/16"
+  network       = "${google_compute_network.calico-net.self_link}"
+  region        = "${var.region}"
 }
 
-resource "google_compute_forwarding_rule" "default" {
-  name       = "tf-www-forwarding-rule"
-  target     = "${google_compute_target_pool.default.self_link}"
-  port_range = "80"
+data "template_file" "master_init" {
+  template = "${file("master-config.yaml")}"
+
+  vars {
+    ssh_authorized_key = "${file("${var.public_key_path}")}"
+  }
 }
 
-resource "google_compute_instance" "www" {
-  count = 3
+resource "google_compute_instance" "calico-master" {
+  count = 1
 
-  name         = "tf-www-${count.index}"
-  machine_type = "f1-micro"
+  name         = "calico-master-${count.index}"
+  machine_type = "n1-standard-1"
   zone         = "${var.region_zone}"
-  tags         = ["www-node"]
+  #tags         = ["www-node"]
+  tags = ["calico","master"]
 
   disk {
-    image = "ubuntu-os-cloud/ubuntu-1404-trusty-v20160602"
+    image = "coreos-cloud/coreos-stable-1298-5-0-v20170228"
   }
 
   network_interface {
-    network = "default"
+    subnetwork = "${google_compute_subnetwork.calico-subnet.name}"
 
     access_config {
       # Ephemeral
@@ -49,32 +49,46 @@ resource "google_compute_instance" "www" {
 
   metadata {
     ssh-keys = "root:${file("${var.public_key_path}")}"
+    user-data = "${data.template_file.master_init.rendered}"
   }
 
-  provisioner "file" {
-    source      = "${var.install_script_src_path}"
-    destination = "${var.install_script_dest_path}"
+  service_account {
+    scopes = ["https://www.googleapis.com/auth/compute.readonly"]
+  }
 
-    connection {
-      type        = "ssh"
-      user        = "root"
-      private_key = "${file("${var.private_key_path}")}"
-      agent       = false
+}
+
+data "template_file" "node_init" {
+  template = "${file("node-config.yaml")}"
+
+  vars {
+    master_ip = "${google_compute_instance.calico-master.network_interface.0.address}"
+    ssh_authorized_key = "${file("${var.public_key_path}")}"
+  }
+}
+
+resource "google_compute_instance" "calico" {
+  count = 2
+
+  name         = "calico-${count.index}"
+  machine_type = "n1-standard-1"
+  zone         = "${var.region_zone}"
+  tags         = ["www-node"]
+
+  disk {
+    image = "coreos-cloud/coreos-stable-1298-5-0-v20170228"
+  }
+
+  network_interface {
+    subnetwork = "${google_compute_subnetwork.calico-subnet.name}"
+
+    access_config {
+      # Ephemeral
     }
   }
 
-  provisioner "remote-exec" {
-    connection {
-      type        = "ssh"
-      user        = "root"
-      private_key = "${file("${var.private_key_path}")}"
-      agent       = false
-    }
-
-    inline = [
-      "chmod +x ${var.install_script_dest_path}",
-      "sudo ${var.install_script_dest_path} ${count.index}",
-    ]
+  metadata {
+    user-data = "${data.template_file.node_init.rendered}"
   }
 
   service_account {
@@ -82,15 +96,43 @@ resource "google_compute_instance" "www" {
   }
 }
 
-resource "google_compute_firewall" "default" {
-  name    = "tf-www-firewall"
-  network = "default"
+resource "google_compute_firewall" "all-source" {
+  name = "all-source"
+  network = "${google_compute_network.calico-net.name}"
+
+  source_ranges = ["0.0.0.0/0"]
+
+  allow {
+    protocol = "icmp"
+  }
 
   allow {
     protocol = "tcp"
-    ports    = ["80"]
+    ports = [ "22", "3389" ]
+  }
+}
+
+resource "google_compute_firewall" "internal-rules" {
+  name = "internal-rules"
+  network = "${google_compute_network.calico-net.name}"
+
+  source_ranges = ["${google_compute_subnetwork.calico-subnet.ip_cidr_range}"]
+
+  allow {
+    protocol = "4"
   }
 
-  source_ranges = ["0.0.0.0/0"]
-  target_tags   = ["www-node"]
+  allow {
+    protocol = "icmp"
+  }
+
+  allow {
+    protocol = "tcp"
+    ports = [ "0-65535" ]
+  }
+
+  allow {
+    protocol = "udp"
+    ports = [ "0-65535" ]
+  }
 }
