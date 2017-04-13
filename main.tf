@@ -30,13 +30,17 @@ resource "google_compute_instance" "calico-master" {
   count = 1
 
   name         = "calico-master-${count.index}"
-  machine_type = "n1-standard-1"
+  machine_type = "n1-standard-4"
   zone         = "${var.region_zone}"
-  #tags         = ["www-node"]
+
   tags = ["calico","master"]
 
   disk {
-    image = "coreos-cloud/coreos-stable-1298-5-0-v20170228"
+    image = "ubuntu-os-cloud/ubuntu-1610-yakkety-v20170330"
+    # Find images by:
+    #   gcloud config set project dummy-xxxxx
+    #   gcloud auth login
+    #   gcloud compute images list
   }
 
   network_interface {
@@ -48,7 +52,7 @@ resource "google_compute_instance" "calico-master" {
   }
 
   metadata {
-    ssh-keys = "root:${file("${var.public_key_path}")}"
+    #ssh-keys = "root:${file("${var.public_key_path}")}"
     user-data = "${data.template_file.master_init.rendered}"
   }
 
@@ -56,6 +60,31 @@ resource "google_compute_instance" "calico-master" {
     scopes = ["https://www.googleapis.com/auth/compute.readonly"]
   }
 
+  provisioner "file" {
+    source = "install.sh"
+    destination = "/tmp/install.sh"
+
+    connection {
+      type = "ssh"
+      user = "ubuntu"
+    }
+  }
+
+  provisioner "remote-exec" {
+    connection {
+      type = "ssh"
+      user = "ubuntu"
+    }
+
+    inline = [
+      "chmod +x /tmp/install.sh",
+      "sudo /tmp/install.sh",
+      "sudo kubeadm init --token 2a9c0e.31e11f6489468e5e",
+      "mkdir /home/ubuntu/.kube",
+      "sudo cp /etc/kubernetes/admin.conf /home/ubuntu/.kube/config",
+      "sudo chown -R ubuntu /home/ubuntu/.kube"
+    ]
+  }
 }
 
 data "template_file" "node_init" {
@@ -76,7 +105,7 @@ resource "google_compute_instance" "calico" {
   tags         = ["www-node"]
 
   disk {
-    image = "coreos-cloud/coreos-stable-1298-5-0-v20170228"
+    image = "ubuntu-os-cloud/ubuntu-1610-yakkety-v20170330"
   }
 
   network_interface {
@@ -93,6 +122,29 @@ resource "google_compute_instance" "calico" {
 
   service_account {
     scopes = ["https://www.googleapis.com/auth/compute.readonly"]
+  }
+
+  provisioner "file" {
+    source = "install.sh"
+    destination = "/tmp/install.sh"
+
+    connection {
+      type = "ssh"
+      user = "ubuntu"
+    }
+  }
+
+  provisioner "remote-exec" {
+    connection {
+      type = "ssh"
+      user = "ubuntu"
+    }
+
+    inline = [
+      "chmod +x /tmp/install.sh",
+      "sudo /tmp/install.sh",
+      "sudo kubeadm join --token 2a9c0e.31e11f6489468e5e ${google_compute_instance.calico-master.network_interface.0.address}:6443",
+    ]
   }
 }
 
